@@ -1,0 +1,31 @@
+# Builds the add-on with the BigWigs packager when a version tag (v...) is
+# pushed, and uploads the zip to CurseForge and to a GitHub release.
+# A tag with "alpha" or "beta" in it makes an alpha or beta file; any other
+# tag makes a release file. See docs/RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # to create the GitHub release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }} # provided by GitHub, nothing to set up
+    steps:
+      - name: Clone project
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # whole history, for the changelog
+
+      - name: Package and release
+        uses: BigWigsMods/packager@v2
+        with:
+          pandoc: false # only needed for WoWInterface
+          args: -n "{package-name}-{project-version}:{package-name}-{project-version}"

@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: SakaMind Probe
+## Notes: Test add-on for SakaMind: finds out which ways of sharing defensive cooldowns work during boss fights.
+## Author: Cynbell
+## Version: @project-version@
+## SavedVariables: SakaMindProbeDB
+
+Probe.lua

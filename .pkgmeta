@@ -1,0 +1,13 @@
+# BigWigs packager settings (see docs/RELEASING.md).
+# The add-on lives in a subfolder; move-folders makes it the zip's only
+# folder, the way DBM does it. Dotfiles are left out automatically.
+package-as: SakaMindProbe
+
+move-folders:
+  SakaMindProbe/SakaMindProbe: SakaMindProbe
+
+ignore:
+  - docs
+  - dist
+  - README.md
+  - AGENTS.md
