@@ -9,7 +9,9 @@
 --      after the boss. It records what each send returned and what the
 --      other player's probe received. Probes find each other with a short
 --      "hello" on the group channel; the automatic tests run only when
---      another probe user is in the group, and go only to them.
+--      another probe user is in the group, and go only to them. After each
+--      boss, each probe sends its own results to the others, so one
+--      player's log holds every side.
 --   2. Whether your own casts arrive with a readable spell ID in combat
 --      (the paladin's Lay on Hands, for example).
 --   3. Whether Blizzard's damage meter shows a party member's Lay on Hands
@@ -29,7 +31,7 @@
 local ADDON_NAME = ...
 
 local PREFIX = "SakaMindProbe"
-local PROTOCOL = "1"
+local PROTOCOL = "2"
 local LOG_MAX = 1500
 local SEND_EVERY = 8 -- seconds between automatic sends during a boss fight
 local METER_EVERY = 3 -- seconds between damage meter checks in combat
@@ -113,14 +115,24 @@ local encounter -- { name, start } while a boss fight is on
 local seq = 0
 local partyNames = {} -- unit -> "Name-Realm", read out of combat
 local partyGUIDs = {} -- unit -> GUID, read out of combat
-local links = {} -- "Name-Realm" -> Battle.net game account ID
-local peers = {} -- PeerKey("Name-Realm") -> { name, lastSeen } for players running the probe
-local helloAnswered = {} -- "Name-Realm" -> when their last hello was answered
+local links = {} -- party member's GUID -> Battle.net game account ID
+-- Players running the probe, by GUID: { guid, name, lastSeen }. Players are
+-- told apart by GUID, which every message carries, because names differ:
+-- on Forever the game calls a player "Name Realm-INTERNALREALM" in messages
+-- but "Name" and "Realm" in unit names. "name" is the one from messages,
+-- which also serves as the whisper target.
+local peers = {}
+local helloAnswered = {} -- GUID -> when their last hello was answered
+local myGUID
 local stats = {} -- phase -> { sent = { channel -> { result -> count } }, recv = { channel -> count } }
 local ownCasts = {} -- phase -> { readable, hidden }
 local meterStatus = {} -- unit -> last damage meter status line
 local meterSeen = {} -- "unit:spellID" -> true once reported this fight
 local alerted = {} -- channel -> true once a boss-time arrival was announced
+local bossReadable = {} -- watched spells you cast with a readable spell ID during the current boss
+local meterFinds = {} -- Lay on Hands or Tranquility found on the damage meter since the boss started
+local lastBoss -- this probe's results for the last boss, kept for sending
+local resultsState -- nil, "waiting" (not due yet) or "due" (waiting for the chat lock to end)
 local soundIDs = {}
 local errorsShown = 0
 local panel
@@ -140,6 +152,22 @@ local function Show(value)
     return "<secret>"
   end
   return tostring(value)
+end
+
+-- Cuts text to at most max bytes without splitting a UTF-8 character.
+local function Cut(text, max)
+  if #text <= max then
+    return text
+  end
+  local cut = max
+  while cut > 0 do
+    local byte = text:byte(cut + 1)
+    if byte < 0x80 or byte >= 0xC0 then
+      break
+    end
+    cut = cut - 1
+  end
+  return text:sub(1, cut)
 end
 
 local function Stamp()
@@ -283,31 +311,36 @@ local function GroupChannel()
   return IsInRaid() and "RAID" or "PARTY"
 end
 
--- "Name" or "Name-Realm" -> "Name-Realm", the form partyNames uses.
-local function WithRealm(name)
-  if not name:find("-", 1, true) then
-    return name .. "-" .. MyRealm()
+local function MyGUID()
+  if not myGUID then
+    local guid = UnitGUID("player")
+    if guid and not IsSecret(guid) then
+      myGUID = guid
+    end
   end
-  return name
+  return myGUID or "?"
 end
 
--- "Name-Realm" in a form that matches however the realm is written (with or
--- without spaces, as message senders and unit names may differ).
-local function PeerKey(name)
-  return (name:gsub("[%s'%-]", ""):lower())
-end
-
--- Party members known to run the probe. Their names are read out of
--- combat, so this works during fights too.
+-- Party members known to run the probe, as their peers entries. Party
+-- GUIDs are read out of combat, so this works during fights too.
 local function GroupPeers()
   local list = {}
   for _, unit in ipairs(PARTY_UNITS) do
-    local name = partyNames[unit]
-    if name and peers[PeerKey(name)] then
-      list[#list + 1] = name
+    local guid = partyGUIDs[unit]
+    if guid and peers[guid] then
+      list[#list + 1] = peers[guid]
     end
   end
   return list
+end
+
+-- The party member's name for a GUID, as read out of combat.
+local function NameForGUID(guid)
+  for _, unit in ipairs(PARTY_UNITS) do
+    if partyGUIDs[unit] and partyGUIDs[unit] == guid then
+      return partyNames[unit]
+    end
+  end
 end
 
 -- Statistics --------------------------------------------------------------
@@ -391,17 +424,6 @@ local function FindGameAccount(guid, shortName)
   end
 end
 
-local function NameForGameAccount(id)
-  if IsSecret(id) then
-    return nil
-  end
-  for name, other in pairs(links) do
-    if other == id then
-      return name
-    end
-  end
-end
-
 local function UpdateRowNames()
   for unit, row in pairs(rows) do
     local name = partyNames[unit]
@@ -431,9 +453,12 @@ local function RefreshParty(reason)
       partyGUIDs[unit] = guid
       if full then
         local id, how = FindGameAccount(guid, full:match("^[^-]+"))
-        links[full] = id
-        summary[#summary + 1] = id and format("%s: Battle.net game account %s (found by %s)", full, Show(id), how)
-          or format("%s: no Battle.net link (not Battle.net friends?)", full)
+        if guid then
+          links[guid] = id
+        end
+        local label = format("%s (%s)", full, guid or "no GUID")
+        summary[#summary + 1] = id and format("%s: Battle.net game account %s (found by %s)", label, Show(id), how)
+          or format("%s: no Battle.net link (not Battle.net friends?)", label)
       end
     end
   end
@@ -443,17 +468,23 @@ end
 
 -- Sending -------------------------------------------------------------------
 
--- protocol;kind;number;sender's chat lock (L, - or ?);sender's boss time
-local function Payload(kind)
+-- protocol;kind;number;sender's chat lock (L, - or ?);sender's boss time;
+-- sender's GUID, then ";text" for messages that carry text (the boss
+-- results).
+local function Payload(kind, text)
   seq = seq + 1
   local lock = Locked()
   local t = EncounterTime()
-  return format("%s;%s;%d;%s;%s", PROTOCOL, kind, seq,
-    lock == nil and "?" or (lock and "L" or "-"), t and format("%.1f", t) or "-")
+  local payload = format("%s;%s;%d;%s;%s;%s", PROTOCOL, kind, seq,
+    lock == nil and "?" or (lock and "L" or "-"), t and format("%.1f", t) or "-", MyGUID())
+  if text then
+    payload = payload .. ";" .. text
+  end
+  return payload
 end
 
-local function SendAddon(kind, channel, target)
-  local payload = Payload(kind)
+local function SendAddon(kind, channel, target, text)
+  local payload = Payload(kind, text)
   local ok, result = Try(C_ChatInfo, "SendAddonMessage", PREFIX, payload, channel, target)
   local name = ok and EnumName(Enum.SendAddonMessageResult, result) or ("error " .. Show(result))
   CountSent(channel, name)
@@ -489,7 +520,7 @@ local function SendRound(kind)
       end
       for _, unit in ipairs(PARTY_UNITS) do
         if partyNames[unit] then
-          targets[#targets + 1] = partyNames[unit]
+          targets[#targets + 1] = { guid = partyGUIDs[unit], name = partyNames[unit] }
         end
       end
     end
@@ -498,10 +529,11 @@ local function SendRound(kind)
   if LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
     parts[#parts + 1] = SendAddon(kind, "INSTANCE_CHAT")
   end
-  for _, name in ipairs(targets) do
-    parts[#parts + 1] = SendAddon(kind, "WHISPER", name)
-    if links[name] then
-      parts[#parts + 1] = SendBattleNet(kind, name, links[name])
+  for _, peer in ipairs(targets) do
+    parts[#parts + 1] = SendAddon(kind, "WHISPER", peer.name)
+    local id = peer.guid and links[peer.guid]
+    if id then
+      parts[#parts + 1] = SendBattleNet(kind, peer.name, id)
     end
   end
   local line = table.concat(parts, ", ")
@@ -510,6 +542,59 @@ local function SendRound(kind)
     alerted.firstBossSend = true
     Say("first send during the boss: %s", line)
   end
+end
+
+-- Boss results ------------------------------------------------------------------
+
+-- This probe's results for the last boss, as short lines for the other
+-- probe users: its messages during the boss, whether its own casts were
+-- readable, and what its damage meter showed.
+local function ResultLines()
+  local own = lastBoss.own
+  return {
+    format("boss %s, %s after %.0f s", lastBoss.name, lastBoss.kind, lastBoss.lasted),
+    "my messages during the boss, " .. lastBoss.traffic,
+    format("my casts during the boss: %d readable, %d hidden; watched spells readable: %s",
+      own.readable, own.hidden, #lastBoss.readable > 0 and table.concat(lastBoss.readable, ", ") or "none"),
+    "my damage meter found: " .. (#meterFinds > 0 and table.concat(meterFinds, ", ") or "nothing"),
+  }
+end
+
+-- Sends the results on the group channel, which reaches every probe user
+-- in the group at once (four messages, well within the game's throttle).
+-- Returns true if they went out.
+local function SendResults(reason)
+  if not lastBoss then
+    return false
+  end
+  if not IsInGroup() or #GroupPeers() == 0 then
+    resultsState = nil
+    Log("boss results not sent (%s): no other probe user in the group", reason)
+    return false
+  end
+  local lines = ResultLines()
+  local parts = {}
+  for i, line in ipairs(lines) do
+    local text = format("%d/%d %s", i, #lines, line):gsub("[|;]", "/")
+    parts[#parts + 1] = SendAddon("result", GroupChannel(), nil, Cut(text, 190))
+  end
+  resultsState = nil
+  Log("sent my boss results (%s): %s %s", reason, table.concat(parts, ", "), Flags())
+  return true
+end
+
+-- Sends the results if the chat lock is off; otherwise the end of the lock
+-- sends them (see ADDON_RESTRICTION_STATE_CHANGED).
+local function TrySendResults(reason)
+  if not resultsState then
+    return
+  end
+  if Locked() then
+    resultsState = "due"
+    Log("boss results wait for the chat lock to end")
+    return
+  end
+  SendResults(reason)
 end
 
 -- Receiving -----------------------------------------------------------------
@@ -523,17 +608,34 @@ local function OnProbeMessage(channel, sender, text)
   if type(sender) ~= "string" or type(text) ~= "string" then
     return
   end
-  local _, kind, number, theirLock, theirTime = strsplit(";", text)
-  if sender == FullName("player") or sender:match("^[^-]+") == UnitName("player") then
+  local protocol, kind, number, theirLock, theirTime, guid, rest = strsplit(";", text, 7)
+  if protocol ~= PROTOCOL or not guid or guid == "" then
+    Log("recv %s from %s: another probe version (protocol %s), ignored", channel, sender, Show(protocol))
+    return
+  end
+  if guid == MyGUID() then
     Log("echo %s #%s %s %s", channel, Show(number), Show(kind), Flags())
     return
   end
-  if channel ~= "BNET" then
-    sender = WithRealm(sender)
+  if channel == "BNET" then
+    sender = NameForGUID(guid) or sender
   end
-  local key = PeerKey(sender)
-  peers[key] = peers[key] or { name = sender }
-  peers[key].lastSeen = GetTime()
+  local peer = peers[guid]
+  if not peer then
+    peer = { guid = guid, name = sender }
+    peers[guid] = peer
+    Log("new probe user %s (%s)", sender, guid)
+  elseif channel ~= "BNET" then
+    peer.name = sender -- the name the game uses for them, which whispers need
+  end
+  peer.lastSeen = GetTime()
+  if kind == "result" then
+    Log("results from %s: %s", sender, Show(rest))
+    if type(rest) == "string" and rest:find("^1/") then
+      Say("got %s's results for the last boss (saved in the log)", sender:match("^[^-]+"))
+    end
+    return
+  end
   CountReceived(channel)
   local mine = EncounterTime()
   Log("recv %s from %s #%s %s: their chat lock %s, their boss time %s; my boss time %s %s",
@@ -541,7 +643,7 @@ local function OnProbeMessage(channel, sender, text)
     mine and format("%.1f", mine) or "-", Flags())
   -- Answer a hello (at most every 10 s per player), so that a probe which
   -- joined or reloaded later learns about this one too.
-  if kind == "hello" and (GetTime() - (helloAnswered[sender] or -100)) > 10 then
+  if kind == "hello" and (GetTime() - (helloAnswered[guid] or -100)) > 10 then
     local reply
     if channel == "PARTY" or channel == "RAID" or channel == "INSTANCE_CHAT" then
       reply = SendAddon("hello back", channel)
@@ -549,7 +651,7 @@ local function OnProbeMessage(channel, sender, text)
       reply = SendAddon("hello back", "WHISPER", sender)
     end
     if reply then
-      helloAnswered[sender] = GetTime()
+      helloAnswered[guid] = GetTime()
       Log("send hello back: %s %s", reply, Flags())
     end
   end
@@ -626,6 +728,8 @@ local function CheckMeter(unit, when)
             local key = unit .. ":" .. id
             if METER_SPELLS[id] and not meterSeen[key] then
               meterSeen[key] = true
+              meterFinds[#meterFinds + 1] = format("%s for %s (%s)", METER_SPELLS[id],
+                (partyNames[unit] or unit):match("^[^-]+"), when)
               Say("|cff66ff66damage meter shows %s for %s|r (%s) %s",
                 METER_SPELLS[id], partyNames[unit] or unit, when, Flags())
               PlaySoundFile(DING, "Master")
@@ -848,6 +952,39 @@ local function StatusText()
     InCombatLockdown() and "yes" or "no", #GroupPeers())
 end
 
+-- The panel holds aura containers, so it's shown or hidden out of combat
+-- only. The choice is kept across sessions.
+local function SetPanelShown(shown)
+  if InCombatLockdown() then
+    Say("the panel can be shown or hidden only out of combat")
+    return
+  end
+  db.shown = shown
+  if panel then
+    panel:SetShown(shown)
+  end
+  if not shown then
+    Say("panel hidden; /smp show brings it back")
+  end
+end
+
+-- A small close button in the panel's top right corner.
+local function AddCloseButton()
+  local ok, close = pcall(CreateFrame, "Button", nil, panel, "UIPanelCloseButton")
+  if not ok then
+    close = CreateFrame("Button", nil, panel)
+    local x = close:CreateFontString(nil, "OVERLAY")
+    x:SetFont(FONT, 12, "OUTLINE")
+    x:SetPoint("CENTER")
+    x:SetText("x")
+  end
+  close:SetSize(20, 20)
+  close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, 0)
+  close:SetScript("OnClick", function()
+    Safe(SetPanelShown, false)
+  end)
+end
+
 local function BuildPanel()
   if panel or InCombatLockdown() then
     return
@@ -880,6 +1017,7 @@ local function BuildPanel()
   end)
 
   Label("SakaMind probe  (/smp for commands)", 6, -5, 11)
+  AddCloseButton()
   panel.status = Label("", 6, -20)
   Label("Defensives now", 100, -36, 9)
   Label("Forb.", 222, -36, 9)
@@ -929,16 +1067,6 @@ local function BuildPanel()
   UpdateRowNames()
 end
 
-local function SetPanelShown(shown)
-  if InCombatLockdown() then
-    Say("the panel can be shown or hidden only out of combat")
-    return
-  end
-  db.shown = shown
-  if panel then
-    panel:SetShown(shown)
-  end
-end
 
 -- Session report ----------------------------------------------------------------
 
@@ -952,7 +1080,7 @@ local function ReportClient()
   local okAddon, addonVersion = Try(C_AddOns, "GetAddOnMetadata", ADDON_NAME, "Version")
   Log("---- session: %s %s, client %s (%s), %s, %s ----", ADDON_NAME,
     okAddon and Show(addonVersion) or "?", Show(version), Show(build), Show(FullName("player")), Show(class))
-  Log("trial account %s, veteran account %s, outgoing add-on chat restricted on this realm %s",
+  Log("trial account %s, veteran account %s, add-ons barred from sending chat messages (not add-on messages) on this realm %s",
     okTrial and Show(trial) or "?", okVeteran and Show(veteran) or "?",
     okRestricted and Show(restricted) or "?")
   Log("damage meter available %s%s, damageMeterEnabled %s",
@@ -1041,6 +1169,8 @@ function handlers.ENCOUNTER_START(_, name)
   encounter = { name = Show(name), start = GetTime() }
   stats.boss = nil
   wipe(alerted)
+  wipe(bossReadable)
+  wipe(meterFinds)
   if encounterTicker then
     encounterTicker:Cancel()
     encounterTicker = nil
@@ -1067,6 +1197,24 @@ function handlers.ENCOUNTER_END(_, name, _, _, success)
   local lasted = encounter and (GetTime() - encounter.start) or 0
   Log("boss end: %s, %s after %.0f s %s", Show(name), kind, lasted, Flags())
   CheckAllMeters("boss end")
+  -- Keep this boss's results for the other probe users; they go out in
+  -- 15 s, or when the chat lock ends if it's still on then.
+  local own = ownCasts.boss or { readable = 0, hidden = 0 }
+  local readable = {}
+  for spellName in pairs(bossReadable) do
+    readable[#readable + 1] = spellName
+  end
+  table.sort(readable)
+  lastBoss = {
+    name = Show(name),
+    kind = kind,
+    lasted = lasted,
+    own = { readable = own.readable, hidden = own.hidden },
+    readable = readable,
+    traffic = SummaryText("boss") or "nothing sent or received",
+  }
+  resultsState = "waiting"
+  After(15, TrySendResults, "after the boss")
   encounter = nil
   After(0.5, SendRound, kind)
   After(3, SendRound, kind)
@@ -1141,6 +1289,9 @@ function handlers.ADDON_RESTRICTION_STATE_CHANGED(kind, state)
     elseif stateName == "Inactive" then
       SendRound("lock ended")
       RegisterSounds("chat lock ended")
+      if resultsState == "due" then
+        After(2, TrySendResults, "chat lock ended")
+      end
     end
   end
 end
@@ -1161,8 +1312,7 @@ function handlers.BN_CHAT_MSG_ADDON(prefix, text, _, senderID)
     return
   end
   if prefix == PREFIX then
-    local name = NameForGameAccount(senderID) or ("game account " .. Show(senderID))
-    OnProbeMessage("BNET", name, text)
+    OnProbeMessage("BNET", "game account " .. Show(senderID), text)
   end
 end
 
@@ -1175,6 +1325,9 @@ function handlers.UNIT_SPELLCAST_SUCCEEDED(_, _, spellID)
   local name = WATCHED_CASTS[spellID]
   if name then
     local phase = Phase()
+    if phase == "boss" then
+      bossReadable[name] = true
+    end
     Log("your %s (%d) cast had a readable spell ID, during %s %s", name, spellID, phase, Flags())
     if phase ~= "ooc" then
       Say("your %s cast was readable during %s", name, phase == "boss" and "the boss" or "combat")
@@ -1209,6 +1362,7 @@ local HELP = {
   "/smp meter - check the damage meter now; /smp meter on - switch it on",
   "/smp sounds - register the defensive sounds again",
   "/smp status - chat lock, boss, peers and the last boss summary",
+  "/smp results - send your last boss results to the other probe users again",
   "/smp show | hide - the panel",
   "/smp verbose - print every log line in chat (again to stop)",
   "/smp clear - empty the log",
@@ -1221,7 +1375,8 @@ local function PrintLinks()
     local full = partyNames[unit]
     if full then
       any = true
-      Say("%s: %s", full, links[full] and ("Battle.net game account " .. Show(links[full]))
+      local id = partyGUIDs[unit] and links[partyGUIDs[unit]]
+      Say("%s: %s", full, id and ("Battle.net game account " .. Show(id))
         or "no Battle.net link (you need to be Battle.net friends)")
     end
   end
@@ -1270,6 +1425,14 @@ SlashCmdList.SAKAMINDPROBE = function(message)
       Say("%d sounds registered (see the log for refusals)", #soundIDs)
     elseif command == "status" then
       PrintStatus()
+    elseif command == "results" then
+      if Locked() then
+        Say("wait until the chat lock ends")
+      elseif SendResults("command") then
+        Say("boss results sent to the other probe users")
+      else
+        Say("not sent: no boss results yet, or no other probe user in the group")
+      end
     elseif command == "show" then
       BuildPanel()
       SetPanelShown(true)

@@ -30,7 +30,9 @@ druid too if they can. The probe does its tests by itself; you mostly play.
      "probe user" with a recent message.
 5. The panel shows each party member in a row: their defensive buffs right
    now, Forbearance, and their healing this fight from the damage meter.
-   Drag it wherever it doesn't get in the way.
+   Drag it wherever it doesn't get in the way, or close it with its `x`
+   button (`/smp show` brings it back). It can't be closed or opened
+   during combat.
 
 ## In the dungeon
 
@@ -50,7 +52,10 @@ druid too if they can. The probe does its tests by itself; you mostly play.
      the boss", "damage meter shows Lay on Hands", "your ... cast was
      readable".
 9. About 15 seconds after the kill, the probe prints a "boss summary" line:
-   what was sent on each channel, what came back, and what arrived.
+   what was sent on each channel, what came back, and what arrived. Then
+   each probe sends its own results to the other, and you get a chat line
+   "got <name>'s results for the last boss". If it doesn't come,
+   `/smp results` on the paladin's side sends them again.
 10. A second boss, if you can, makes the result surer.
 
 ## After the run
@@ -59,8 +64,8 @@ druid too if they can. The probe does its tests by itself; you mostly play.
 12. Tell me what you saw and heard (panel, dings, chat lines). I read your
     log directly from your
     `_forever_\WTF\Account\<account>\SavedVariables\SakaMindProbe.lua`.
-    The paladin sends me theirs: the same file in their own account
-    folder.
+    It holds the paladin's results too, so their file is needed only if I
+    ask for it: the same file in their own account folder.
 
 ## What each result decides
 

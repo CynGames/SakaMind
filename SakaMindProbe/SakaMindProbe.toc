@@ -4,5 +4,6 @@
 ## Author: Cynbell
 ## Version: @project-version@
 ## SavedVariables: SakaMindProbeDB
+## X-Curse-Project-ID: 1796066
 
 Probe.lua

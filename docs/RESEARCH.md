@@ -17,6 +17,7 @@ Confidence labels:
   (Gethe/wow-ui-source, branch `forever`, commit `9dc84f0`, = 1.60.1 70862),
   in the add-ons installed on this client, or on the cited page.
 - **Reported**: found by web research and not re-read here.
+- **In game**: seen in the probe's log on the player's client.
 - **Test**: needs the in-game test run ([TEST-RUN.md](TEST-RUN.md)).
 
 ## Short answer
@@ -159,7 +160,13 @@ Confidence labels:
   or is removed on a unit. It replaced `AddPrivateAuraAppliedSound` in
   12.1.0. DBM registers its sounds only outside the chat lock ("adding
   sounds still combat restricted", `DBM-Core\modules\objects\BossMod.lua`).
-  Whether it accepts helpful auras on party members: **Test.**
+  Registering sounds for helpful auras on you and party1 to party4 works
+  out of combat: 65 sounds, none refused (**In game**, 2026-11-10). Whether
+  they play: **Test.**
+- `C_Secrets` reports every spell the probe watches as hidden in combat,
+  both aura and cast, Lay on Hands and Forbearance included; none is never
+  hidden. So no defensive can be timed live from its aura or cast ID.
+  **In game** (2026-11-10).
 
 ### 6. Lay on Hands
 
@@ -181,8 +188,8 @@ Confidence labels:
   unit except you and your pet, Cynbrew research §6), so it knows about a
   Lay on Hands at once. Getting that out during the boss needs route 1,
   Battle.net. **Test.**
-- Forbearance (25771) exists on Forever. Which spells apply it, and whether
-  it's never hidden: **Test** (the probe shows it if it is).
+- Forbearance (25771) exists on Forever and is hidden in combat like the
+  rest (**In game**). Which spells apply it: **Test**.
 
 ### 7. Other add-ons
 
@@ -200,6 +207,18 @@ Confidence labels:
   (same test; Blizzard forum report, 2026-11-06). Trial and Veteran
   accounts can't send add-on messages on Forever 1.60.1. **Reported**
   ([test][s-reddit], [forum][s-forum], [wiki][s-wiki-send]).
+- Party add-on messages: the probe's sends return `Success` and come back
+  to the sender, as they should. **In game** (2026-11-10).
+- Names differ between messages and units. Add-on messages give the sender
+  as `Name Realm-<internal realm name>`, while `UnitFullName` gives `Name`
+  and `Realm`, so matching players by name fails. The probe puts the
+  sender's GUID in every message (protocol 2) and identifies players by
+  it. Whether whispers to the message-form name arrive: **Test.** Names:
+  **In game** (2026-11-10).
+- `C_ChatInfo.AreOutgoingAddonChatMessagesRestricted()` returns true on
+  Forever's realms. Its documentation says it covers add-ons sending chat
+  messages, not add-on messages ("the ability for addons to receive comms
+  is controlled separately"). **Verified** (docs) and **In game**.
 
 ### 9. Account risk of workaround add-ons
 

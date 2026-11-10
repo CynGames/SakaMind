@@ -49,8 +49,9 @@ gave the expected package: one `SakaMindProbe` folder holding the TOC,
    add that token as the secret `CF_API_TOKEN`.
 4. Here: add `## X-Curse-Project-ID: <ID>` to the TOC.
 
-Status, 2026-11-10: the GitHub repository and its `CF_API_TOKEN` secret are
-set up. The CurseForge project and its ID in the TOC are still to come.
+Status, 2026-11-10: all done. The GitHub repository has its `CF_API_TOKEN`
+secret, and the CurseForge project "SakaMind" (ID 1796066) is created and
+set in the TOC. CurseForge still has to approve the project.
 
 ## Making a release
 
