@@ -67,6 +67,22 @@ druid too if they can. The probe does its tests by itself; you mostly play.
     It holds the paladin's results too, so their file is needed only if I
     ask for it: the same file in their own account folder.
 
+## Follow-up tests (2026-11-11)
+
+Both run on your client only. The paladin needs no update: his probe can
+stay on or be turned off.
+
+1. Solo, in town: type `/smp flags` and wait a few seconds for "flag check
+   done". The probe checks Blizzard's yes/no flags of every spell and tells
+   you how many other spells answer like Lay on Hands. Then `/reload` and
+   tell me. Not run: the project was dropped on 2026-11-11 first.
+2. Any dungeon, strangers too: nothing to do. After each boss the probe
+   prints "party casts during the boss: …". It says whether party members'
+   casts reached the probe mid-fight with a hidden spell ID, and how many
+   of its test calls accepted that hidden ID. Done 2026-11-11 on trash:
+   party casts barely arrive during your combat, and the calls accept
+   hidden IDs (RESEARCH.md, party-cast test).
+
 ## What each result decides
 
 | Result | What it means for SakaMind |
@@ -80,3 +96,4 @@ druid too if they can. The probe does its tests by itself; you mostly play.
 | Defensive buffs shown on the panel | The live display works as planned. |
 | Dings play | SakaMind can add a sound per defensive. |
 | Some spell or Forbearance "never hidden" | SakaMind can time those uses live during the fight. |
+| Lay on Hands answers Blizzard's flags unlike the paladin's other heals | The damage meter's hidden healing list can drive a light that shows only for Lay on Hands. |

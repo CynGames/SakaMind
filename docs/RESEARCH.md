@@ -4,6 +4,10 @@ Research, 2026-11-10. The question: how can SakaMind tell the core party
 (paladin, druid and the player's priest) about each other's defensive
 cooldowns *during* boss fights, when the game locks add-on chat?
 
+Status: SakaMind was dropped on 2026-11-11 after the tests recorded here
+(see "Outcome" under the options). This file is the record of what they
+found.
+
 This continues the research done for Cynbrew, which lives in the Cynbrew
 repo (`docs/PARTY-COOLDOWNS-RESEARCH.md`). It covers party cooldowns outside
 boss fights: party members' casts are hidden, their buffs are hidden in
@@ -26,9 +30,10 @@ Confidence labels:
   instance encounter is in progress (or a keystone run or PvP match), and
   Blizzard closes workarounds as people find them. **Verified.**
 - What works within that rule:
-  - Syncing up to the pull and after the kill or wipe. The moment the lock
-    starts still counts: a restriction marked `Activating` isn't enforced
-    until the event has been handled. **Verified (docs); Test.**
+  - Syncing up to the pull and after the kill or wipe. A restriction
+    marked `Activating` isn't enforced until the event has been handled
+    (**Verified**, docs), but messages sent then never arrived (test run
+    1), so the last sync has to come before the pull.
   - Timers already running at the pull keep running through the fight.
   - Showing, live, every defensive that puts a buff on a friendly unit:
     Blizzard always lets add-ons pick out group members' helpful buffs by
@@ -38,19 +43,129 @@ Confidence labels:
 - The gap: uses during the fight that leave no buff, above all Lay on Hands
   (the player's main concern, 2026-11-10), and a new countdown for any use
   made during the fight.
-- Routes for the gap, all **Test**:
+- Routes for the gap, tested in test run 1:
   1. Battle.net game data (`C_BattleNet.SendGameData`): not marked as
      restricted in the source, never tested in public, skipped by DBM during
-     the lock. The player chose to test it (decision below).
+     the lock. The player chose to test it (decision below). Result: it
+     returns `AddOnMessageLockdown` during boss encounters like party
+     messages. **In game.**
   2. Blizzard's damage meter: it records Lay on Hands and Tranquility as
      heals. Readable after combat; in combat at best shown as icons.
+     Result: in combat only the number of spells, IDs hidden; Lay on Hands
+     by ID after combat. **In game.**
   3. Never-hidden auras: if Forever never hides some defensive buff, or
      Forbearance, an add-on can read it in combat and time the use.
+     Result: none is never hidden. **In game.**
 - Ruled out: overlays that read the combat log file, side channels in the
   game, and anything that feeds data back into the game from outside.
 - Account risk: no first-hand report was found of a suspension caused by an
   add-on that works around the Midnight restrictions. Blizzard's record is to
   break the API, and to ban for outside tools (§9).
+- Test run 1 settled the routes (next section): Battle.net is locked like
+  everything else, a send at the pull never arrives, and own casts are
+  readable throughout, so each client can report its own uses outside boss
+  encounters at once and right after the boss for uses during it.
+- A key press doesn't lift the lock: sends made from a key press during two
+  boss encounters were locked like the timer sends (next sections), so no
+  key bind, SakaBind's included, can send during a boss. **In game.**
+- Party members' casts barely reach add-ons while the player is in combat
+  (party-cast test), so no display can follow them mid-fight. **In game.**
+- Open lead: the damage meter, which lists a party member's Lay on Hands
+  live with its spell ID hidden. Blizzard accepts hidden spell IDs in its
+  yes/no spell checks, in `SetAlphaFromBoolean` and in status bars, so a
+  light could show only when the paladin's healing list holds Lay on Hands:
+  live, but without the time of use (§5). **Test.**
+
+## Test run 1 (2026-11-10)
+
+A real dungeon with two bosses (kills after 42 s and 52 s) and three
+clients running the probe: the player's priest, the paladin and the druid,
+all Battle.net friends. Everything below is from the player's log, which
+also holds the other two clients' results. **In game.**
+
+- During both bosses every send failed with `AddOnMessageLockdown`: party,
+  whisper and Battle.net game data alike, on all three clients, and nothing
+  arrived. **Battle.net is no way around the lock.**
+- At the pull the chat restriction went `Activating`. Sends made then
+  returned `Success` but never arrived, so a last snapshot at the pull
+  doesn't work; the last sync has to come before it.
+- The lock ended together with the encounter. Messages sent at that moment
+  and after the kill arrived within a second.
+- Outside boss encounters messages work in combat too: party, whisper (to
+  the sender name from messages) and Battle.net all arrived during trash
+  fights.
+- Own casts: every cast on each client had a readable spell ID, in trash
+  combat and during the bosses (the player 18 casts during a boss, the
+  other two 17 to 33 per boss; none hidden). Each client knows its own
+  defensives the moment it uses them, Lay on Hands included.
+- Damage meter: in combat it gives how many healing spells each party
+  member has used, with their IDs hidden. After combat the IDs are
+  readable: the paladin's Lay on Hands (rank 2800) showed up after two
+  trash fights. No defensive was used during the two bosses.
+- Seen and heard by the player:
+  - The paladin's Lay on Hands icon appeared in the panel's healing row
+    during the trash fight. The meter's hidden spell IDs can be drawn as
+    icons live. Add-ons still can't tell which spell it is: every field
+    naming a spell is secret in combat and there is no per-spell query
+    (`DamageMeterDocumentation.lua`), so the icon is a display, not a
+    trigger for sounds or timers.
+  - Dings played when big defensives landed on party members, so aura
+    sounds work for helpful auras on party units.
+  - Whether the panel showed defensive buffs wasn't noticed. Cynbrew's
+    frames use the same aura containers in combat, so it very likely
+    works. **Test** at the next run.
+
+What this means for SakaMind:
+
+- Share each defensive the moment it's used whenever no boss encounter is
+  on, in combat too; and share cooldown state on every change, since
+  nothing sent at the pull arrives.
+- During a boss nothing goes out. Each client keeps its own uses and sends
+  them when the encounter ends, so the others learn of a Lay on Hands used
+  mid-fight within a second of the kill or wipe. Countdowns known before
+  the pull keep running on each client.
+- Leave Battle.net game data out: it adds nothing over party messages.
+- Live during a boss, without messages: helpful buffs on the panel, a ding
+  when a big defensive lands, and each member's healing spells as icons
+  from the damage meter, where a Lay on Hands shows the moment it's used.
+
+## Key-press test (2026-11-11)
+
+In a group without other probe users, the player pressed `/smp send` during
+two boss encounters, 7 s and 37 s in. **In game.**
+
+- Both sends returned `AddOnMessageLockdown`, on the party channel and on
+  all four whispers, like the timer sends in test run 1. A key press
+  doesn't lift the lock, so sending from SakaBind's key presses wouldn't
+  help.
+- Battle.net game data wasn't part of it: nobody in the group was a
+  Battle.net friend. From timer sends it returned the same result in test
+  run 1.
+- As in test run 1, the lock started at each pull and ended with each of
+  the six encounters (32 s to 109 s).
+
+## Party-cast test (2026-11-11)
+
+A group with the paladin, the druid and others; about 70 trash fights, no
+boss in the saved log. Only the player ran the new probe. It counted party
+members' casts and tried display calls with each hidden spell ID. **In
+game.**
+
+- While the player was in combat, party casts almost never reached
+  add-ons: 21 in all, none in 57 of the fights and at most 7 in one, while
+  the player cast 667 spells (up to 103 in one fight). The paladin's Lay on
+  Hands around 19:44 (the damage meter listed it) didn't arrive; nothing
+  from any party member did in that 2½-minute fight.
+- Out of combat they arrive: 30 in one stretch, 26 of them the paladin's,
+  all with the spell ID hidden.
+- Every call tried with a hidden spell ID was accepted in combat:
+  `C_Spell.IsSpellImportant`, `C_UnitAuras.AuraIsBigDefensive`,
+  `C_Spell.IsSpellHelpful`, `SetAlphaFromBoolean` with the answer,
+  `StatusBar:SetValue` with the ID, `C_Spell.GetSpellInfo`, and `SetAlpha`
+  with its cast time. Only `curve:Evaluate` refused, as documented.
+- So no display can follow a party member's casts during a fight, but the
+  display calls work with hidden spell IDs. The damage meter is the source
+  that sees Lay on Hands live.
 
 ## Findings
 
@@ -163,6 +278,31 @@ Confidence labels:
   Registering sounds for helpful auras on you and party1 to party4 works
   out of combat: 65 sounds, none refused (**In game**, 2026-11-10). Whether
   they play: **Test.**
+- Party members' casts (`UNIT_SPELLCAST_SUCCEEDED`) come with their spell
+  ID secret (`SecretWhenUnitSpellCastRestricted`), and while the player is
+  in combat they almost never come at all. **In game** (party-cast test).
+- The secret ID can't become a countdown by itself: duration objects and
+  the Cooldown widget's setters take secret values only from Blizzard's own
+  code (`AllowedWhenUntainted`), there is no lookup of a spell's base
+  cooldown, and curves (`LuaCurveObject:Evaluate`) take secret values only
+  from Blizzard's code too. **Verified** (docs).
+- But a secret can decide what is visible. `SetAlphaFromBoolean` takes a
+  secret boolean from add-on code, and these checks take a secret spell ID
+  from add-on code and return a boolean: `C_Spell.IsSpellImportant`,
+  `C_Spell.IsSpellHelpful`, `C_Spell.IsSpellHarmful`,
+  `C_Spell.SpellHasRange` and `C_UnitAuras.AuraIsBigDefensive` (all
+  `AllowedWhenTainted`). Nested frames multiply their alpha, and swapping
+  the two alpha values inverts a check, so checks combine.
+  `StatusBar:SetValue` takes a secret number as well: a bar whose range is
+  one ID wide fills only from that ID up, so a revealing bar and a
+  covering bar together could show something for one exact spell ID, with
+  no checks needed. **Verified** (docs), and accepted in combat
+  (party-cast test). How the bars draw it: **Test.**
+- Fed the damage meter's secret spell IDs, such a display could show a
+  Lay on Hands light only when the paladin's healing list holds Lay on
+  Hands. The list only says the spell was used this fight, not when, so the
+  light has no countdown. Whether the checks single out Lay on Hands among
+  the paladin's heals: **Test** (`/smp flags`).
 - `C_Secrets` reports every spell the probe watches as hidden in combat,
   both aura and cast, Lay on Hands and Forbearance included; none is never
   hidden. So no defensive can be timed live from its aura or cast ID.
@@ -186,8 +326,9 @@ Confidence labels:
   **Verified (source).**
 - The paladin's own client sees its own casts (casts are secret for every
   unit except you and your pet, Cynbrew research §6), so it knows about a
-  Lay on Hands at once. Getting that out during the boss needs route 1,
-  Battle.net. **Test.**
+  Lay on Hands at once. Nothing can send it out during the boss: party,
+  whisper and Battle.net are all locked, from a key press too (test run 1,
+  key-press test).
 - Forbearance (25771) exists on Forever and is hidden in combat like the
   rest (**In game**). Which spells apply it: **Test**.
 
@@ -260,19 +401,34 @@ r/classicwow over the past year, Blizzard's forums and news sites.
 
 ## Options, ranked
 
-1. **Sync at the edges, plus the live buff display.** Works within the
-   rules. Covers what was ready at the pull, running timers, and each
-   buff-giving defensive as it happens. Misses Lay on Hands and Rebirth
-   during the fight, and new countdowns.
-2. **Battle.net game data during boss fights.** Live updates for
-   everything, Lay on Hands included, if the lock doesn't cover it. Only
-   between Battle.net friends; may be closed later.
-3. **The damage meter for Lay on Hands.** After the fight for sure; during
-   it only if icons can be shown.
+After test run 1:
+
+1. **Each client reports its own uses, plus the live buff display.** At
+   once outside boss encounters (in combat too), and right after the
+   encounter for uses during it. Works within the rules. Misses only the
+   live moment of a use without a buff (Lay on Hands, Rebirth) during a
+   boss.
+2. **The damage meter for Lay on Hands.** Live as an icon among the
+   paladin's heals (test run 1), by ID after combat. With Blizzard's yes/no
+   checks or status bars, perhaps a light that shows only for Lay on Hands
+   (§5, **Test**). It says the spell was used this fight, not when. Also
+   covers party members who don't run SakaMind.
+3. ~~A countdown revealed on each party cast.~~ Party casts barely reach
+   add-ons during the player's combat (party-cast test).
+4. ~~Battle.net game data during boss fights.~~ Locked like party
+   messages (test run 1).
+5. ~~Sending from a key press (SakaBind).~~ Locked like the timer sends
+   (key-press test).
 
 Ruled out: combat log overlays (EULA 1-C, delayed writes), side channels in
 the game (hidden during the lock), and external tools feeding input back
-into the game (automation).
+into the game (automation). Rejected by the player: steps that need
+someone's attention mid-fight, such as a pre-filled chat line to send or
+clicking to start a countdown.
+
+Outcome, 2026-11-11: the player dropped SakaMind instead of testing
+option 2's light. The probe's solo flag check (`/smp flags`), meant to show
+whether Blizzard's yes/no checks can single out Lay on Hands, was never run.
 
 ## Spell IDs on Forever
 

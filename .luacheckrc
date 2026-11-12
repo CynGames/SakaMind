@@ -61,6 +61,8 @@ read_globals = {
   "C_AddOns",
   "C_BattleNet",
   "C_ChatInfo",
+  "C_ClickBindings",
+  "C_CurveUtil",
   "C_DamageMeter",
   "C_Secrets",
   "C_Spell",

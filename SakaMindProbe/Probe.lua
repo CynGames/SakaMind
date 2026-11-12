@@ -19,8 +19,14 @@
 --   4. Party members' defensive buffs, and Forbearance, on the probe's
 --      panel during the fight, and a "ding" when a defensive lands.
 --   5. Which of these spells the game never hides.
+--   6. Whether party members' casts reach add-ons in combat and during a
+--      boss with a hidden spell ID, and whether the calls a display would
+--      need accept that hidden ID. Nothing is shown; it runs in any group.
+--   7. /smp flags: Blizzard's yes/no flags for every spell, to see whether
+--      some combination of them singles out Lay on Hands.
 --
--- Everything goes to SakaMindProbeDB.log, which the game writes to
+-- Everything goes to SakaMindProbeDB.log (the flags to
+-- SakaMindProbeDB.flags), which the game writes to
 -- WTF\Account\<account>\SavedVariables\SakaMindProbe.lua on /reload or
 -- logout. Type /smp for the commands.
 --
@@ -106,6 +112,7 @@ end
 
 local WATCHED_CASTS = NameSet(DEFENSIVES, OTHER_CASTS)
 local METER_SPELLS = NameSet({ LAY_ON_HANDS, TRANQUILITY })
+local LAY_ON_HANDS_IDS = TrueSet({ LAY_ON_HANDS })
 
 -- State -------------------------------------------------------------------
 
@@ -786,6 +793,152 @@ local function LogOwnCasts()
   wipe(ownCasts)
 end
 
+-- Party casts -----------------------------------------------------------------
+
+-- Party members' casts: do they reach add-ons in combat and during a boss,
+-- and with a hidden spell ID? For each hidden ID the probe also tries the
+-- calls a display would need that never reads the spell: Blizzard's yes/no
+-- spell checks, an alpha set from such an answer, a status bar fed the ID,
+-- the spell's details, and a curve (which the docs say refuses hidden
+-- values from add-ons). Nothing is shown, and no answer is looked at; the
+-- probe only counts whether each call was accepted.
+
+local HIDDEN_CALLS = {
+  "IsSpellImportant", "AuraIsBigDefensive", "IsSpellHelpful", "SetAlphaFromBoolean",
+  "StatusBar:SetValue", "GetSpellInfo", "SetAlpha(cast time)", "curve:Evaluate",
+}
+-- phase -> { casts, hidden, units = { unit -> casts }, calls = { name -> { ok, refused, err } } }
+local partyCasts = {}
+local testFrame, testTexture, testBar, testCurve
+
+local function TestObjects()
+  if testFrame then
+    return
+  end
+  testFrame = CreateFrame("Frame")
+  testFrame:Hide()
+  testTexture = testFrame:CreateTexture()
+  testBar = CreateFrame("StatusBar", nil, testFrame)
+  testBar:SetMinMaxValues(0, 1)
+  local ok, curve = Try(C_CurveUtil, "CreateCurve")
+  if ok and curve then
+    testCurve = curve
+    pcall(curve.AddPoint, curve, 0, 0)
+    pcall(curve.AddPoint, curve, 1, 1)
+  end
+end
+
+local function Record(bucket, name, ok, err)
+  local call = bucket.calls[name]
+  if not call then
+    call = { ok = 0, refused = 0 }
+    bucket.calls[name] = call
+  end
+  if ok then
+    call.ok = call.ok + 1
+  else
+    call.refused = call.refused + 1
+    call.err = call.err or Cut(Show(err), 120)
+  end
+end
+
+-- Tries each call with a hidden spell ID. What comes back may be secret;
+-- it is only passed on, never compared.
+local function TryHiddenID(bucket, spellID)
+  TestObjects()
+  local ok, answer = Try(C_Spell, "IsSpellImportant", spellID)
+  Record(bucket, "IsSpellImportant", ok, answer)
+  if ok and (IsSecret(answer) or answer ~= nil) then
+    Record(bucket, "SetAlphaFromBoolean", pcall(testFrame.SetAlphaFromBoolean, testFrame, answer))
+  end
+  Record(bucket, "AuraIsBigDefensive", Try(C_UnitAuras, "AuraIsBigDefensive", spellID))
+  Record(bucket, "IsSpellHelpful", Try(C_Spell, "IsSpellHelpful", spellID))
+  Record(bucket, "StatusBar:SetValue", pcall(testBar.SetValue, testBar, spellID))
+  local info
+  ok, info = Try(C_Spell, "GetSpellInfo", spellID)
+  Record(bucket, "GetSpellInfo", ok, info)
+  if ok and not IsSecret(info) and type(info) == "table" then
+    Record(bucket, "SetAlpha(cast time)", pcall(testTexture.SetAlpha, testTexture, info.castTime))
+  end
+  if testCurve then
+    Record(bucket, "curve:Evaluate", pcall(testCurve.Evaluate, testCurve, spellID))
+  end
+end
+
+local function OnPartyCast(unit, spellID)
+  local phase = Phase()
+  local bucket = partyCasts[phase]
+  if not bucket then
+    bucket = { casts = 0, hidden = 0, units = {}, calls = {} }
+    partyCasts[phase] = bucket
+  end
+  bucket.casts = bucket.casts + 1
+  bucket.units[unit] = (bucket.units[unit] or 0) + 1
+  if IsSecret(spellID) then
+    bucket.hidden = bucket.hidden + 1
+    TryHiddenID(bucket, spellID)
+  end
+end
+
+-- "IsSpellImportant accepted (12); curve:Evaluate refused (12): error", and
+-- how many of the calls tried were always accepted.
+local function HiddenCallText(bucket)
+  local parts, accepted, tried = {}, 0, 0
+  for _, name in ipairs(HIDDEN_CALLS) do
+    local call = bucket.calls[name]
+    if call then
+      tried = tried + 1
+      if call.refused == 0 then
+        accepted = accepted + 1
+        parts[#parts + 1] = format("%s accepted (%d)", name, call.ok)
+      elseif call.ok == 0 then
+        parts[#parts + 1] = format("%s refused (%d): %s", name, call.refused, call.err)
+      else
+        parts[#parts + 1] = format("%s accepted %d, refused %d: %s", name, call.ok, call.refused, call.err)
+      end
+    end
+  end
+  return table.concat(parts, "; "), accepted, tried
+end
+
+-- Logs one phase's party casts and starts that phase afresh. For a boss
+-- the result goes to chat too: it says whether a display can follow a
+-- party member's casts mid-fight. Out of combat it's logged only when some
+-- spell ID was hidden.
+local function ReportPartyCasts(phase, lasted)
+  local bucket = partyCasts[phase]
+  partyCasts[phase] = nil
+  if not bucket then
+    if phase == "boss" and IsInGroup() and (lasted or 0) > 10 then
+      Say("party casts during the boss: none reached the probe")
+    end
+    return
+  end
+  if phase == "ooc" and bucket.hidden == 0 then
+    return
+  end
+  local units = {}
+  for _, unit in ipairs(PARTY_UNITS) do
+    if bucket.units[unit] then
+      units[#units + 1] = format("%s %d", partyNames[unit] or unit, bucket.units[unit])
+    end
+  end
+  Log("party casts during %s: %d, %d with a hidden spell ID (%s)", phase, bucket.casts, bucket.hidden,
+    table.concat(units, ", "))
+  if bucket.hidden == 0 then
+    if phase == "boss" then
+      Say("party casts during the boss: %d, none with a hidden spell ID", bucket.casts)
+    end
+    return
+  end
+  local text, accepted, tried = HiddenCallText(bucket)
+  Log("calls with hidden spell IDs during %s: %s", phase, text)
+  if phase == "boss" then
+    Say("party casts during the boss: %d, %d with a hidden spell ID. %d of %d test calls accepted them (details in the log).",
+      bucket.casts, bucket.hidden, accepted, tried)
+  end
+end
+
 -- Secrecy -----------------------------------------------------------------------
 
 local SECRECY = { [0] = "never hidden", [1] = "always hidden", [2] = "hidden in combat" }
@@ -824,6 +977,202 @@ local function SecrecyReport()
     end
   end
   Say("never hidden: %s", #never > 0 and table.concat(never, ", ") or "none of the probe's spells")
+end
+
+-- Flag check ------------------------------------------------------------------------
+
+-- Blizzard's yes/no spell checks that accept a hidden spell ID from add-on
+-- code, plus spell details a widget can take. If some combination answers
+-- differently for Lay on Hands than for every other spell a paladin casts,
+-- a display could reveal a countdown only on the cast that was Lay on
+-- Hands, without reading which spell it was. /smp flags records every
+-- spell's answers out of combat, where IDs are readable, in
+-- SakaMindProbeDB.flags: one number per spell, one bit per answer (legend
+-- in .bits).
+
+local FLAG_CHECKS = {
+  { "important", C_Spell, "IsSpellImportant" },
+  { "big defensive", C_UnitAuras, "AuraIsBigDefensive" },
+  { "helpful", C_Spell, "IsSpellHelpful" },
+  { "harmful", C_Spell, "IsSpellHarmful" },
+  { "has range", C_Spell, "SpellHasRange" },
+  { "consumable", C_Spell, "IsConsumableSpell" },
+  { "passive", C_Spell, "IsSpellPassive" },
+  { "private aura", C_UnitAuras, "AuraIsPrivate" },
+  { "click-bindable", C_ClickBindings, "CanSpellBeClickBound" },
+}
+local FLAG_DETAILS = { "cast time", "min range", "max range", "power cost" }
+-- The spell ID ranges that hold Forever's spells (wago.tools SpellName,
+-- build 70888, with a margin).
+local FLAG_RANGES = {
+  { 1, 105000 }, { 134000, 184000 }, { 219000, 220000 },
+  { 240000, 262000 }, { 285000, 475000 }, { 1213000, 1331000 },
+}
+local FLAG_STEP = 4000 -- spell IDs checked per frame
+local flagScan -- the running check: { range, id, sig, count, started, ticker }
+
+local function Positive(value)
+  return not IsSecret(value) and type(value) == "number" and value > 0
+end
+
+local function FlagNames()
+  local names = {}
+  for _, check in ipairs(FLAG_CHECKS) do
+    names[#names + 1] = check[1]
+  end
+  for _, detail in ipairs(FLAG_DETAILS) do
+    names[#names + 1] = detail
+  end
+  return names
+end
+
+-- One spell's answers as a number: bit 1 for the first name in
+-- FlagNames(), 2 for the second, and so on.
+local function SpellMask(id)
+  local mask, weight = 0, 1
+  for _, check in ipairs(FLAG_CHECKS) do
+    local ok, answer = Try(check[2], check[3], id)
+    if ok and not IsSecret(answer) and answer == true then
+      mask = mask + weight
+    end
+    weight = weight * 2
+  end
+  local details = { false, false, false, false }
+  local ok, info = Try(C_Spell, "GetSpellInfo", id)
+  if ok and not IsSecret(info) and type(info) == "table" then
+    details[1] = Positive(info.castTime)
+    details[2] = Positive(info.minRange)
+    details[3] = Positive(info.maxRange)
+  end
+  local costs
+  ok, costs = Try(C_Spell, "GetSpellPowerCost", id)
+  if ok and not IsSecret(costs) and type(costs) == "table" then
+    for _, cost in ipairs(costs) do
+      if type(cost) == "table" and (Positive(cost.cost) or Positive(cost.minCost) or Positive(cost.costPercent)) then
+        details[4] = true
+      end
+    end
+  end
+  for _, set in ipairs(details) do
+    if set then
+      mask = mask + weight
+    end
+    weight = weight * 2
+  end
+  return mask
+end
+
+-- "helpful, has range, max range" for a mask.
+local function MaskText(mask)
+  local set, weight = {}, 1
+  for _, name in ipairs(FlagNames()) do
+    if mask % (weight * 2) >= weight then
+      set[#set + 1] = name
+    end
+    weight = weight * 2
+  end
+  return #set > 0 and table.concat(set, ", ") or "no flag set"
+end
+
+local function FinishFlags()
+  local scan = flagScan
+  flagScan = nil
+  scan.ticker:Cancel()
+  local legend = {}
+  for i, name in ipairs(FlagNames()) do
+    legend[#legend + 1] = format("%d %s", 2 ^ (i - 1), name)
+  end
+  local version, build = GetBuildInfo()
+  db.flags = {
+    date = date("%Y-%m-%d %H:%M"),
+    build = format("%s (%s)", Show(version), Show(build)),
+    bits = table.concat(legend, ", "),
+    spells = scan.count,
+    seconds = GetTime() - scan.started,
+    sig = scan.sig,
+  }
+  local important, big = 0, 0
+  for _, mask in pairs(scan.sig) do
+    if mask % 2 == 1 then
+      important = important + 1
+    end
+    if mask % 4 >= 2 then
+      big = big + 1
+    end
+  end
+  for _, id in ipairs({ 633, 2800, 10310 }) do
+    local mask = scan.sig[id]
+    if mask then
+      local twins = 0
+      for other, otherMask in pairs(scan.sig) do
+        if otherMask == mask and not LAY_ON_HANDS_IDS[other] then
+          twins = twins + 1
+        end
+      end
+      Say("Lay on Hands %d: %s. %d other spells answer every check the same way.", id, MaskText(mask), twins)
+    else
+      Say("Lay on Hands %d: not found", id)
+    end
+  end
+  Say("flag check done: %d spells in %.0f s, %d marked important, %d big defensives. /reload to save the results.",
+    scan.count, db.flags.seconds, important, big)
+end
+
+local function FlagStep()
+  local scan = flagScan
+  if not scan then
+    return
+  end
+  if InCombatLockdown() then
+    scan.ticker:Cancel()
+    flagScan = nil
+    Say("flag check stopped because combat started; run /smp flags again out of combat")
+    return
+  end
+  local exists = C_Spell.DoesSpellExist
+  for _ = 1, FLAG_STEP do
+    local range = FLAG_RANGES[scan.range]
+    if not range then
+      FinishFlags()
+      return
+    end
+    local id = scan.id
+    if id > range[2] then
+      scan.range = scan.range + 1
+      scan.id = FLAG_RANGES[scan.range] and FLAG_RANGES[scan.range][1] or 0
+    else
+      scan.id = id + 1
+      local ok, found = pcall(exists, id)
+      if ok and found == true then
+        scan.sig[id] = SpellMask(id)
+        scan.count = scan.count + 1
+      end
+    end
+  end
+end
+
+local function StartFlags()
+  if flagScan then
+    Say("the flag check is already running")
+    return
+  end
+  if InCombatLockdown() then
+    Say("run the flag check out of combat")
+    return
+  end
+  if not (C_Spell and C_Spell.DoesSpellExist) then
+    Say("this client has no C_Spell.DoesSpellExist, so the flag check can't run")
+    return
+  end
+  flagScan = { range = 1, id = FLAG_RANGES[1][1], sig = {}, count = 0, started = GetTime() }
+  Say("checking the flags of every spell; it takes a few seconds, stay out of combat")
+  flagScan.ticker = C_Timer.NewTicker(0.01, function()
+    if not Safe(FlagStep) and flagScan then
+      flagScan.ticker:Cancel()
+      flagScan = nil
+      Say("the flag check stopped on an error (see the log)")
+    end
+  end)
 end
 
 -- Aura sounds -----------------------------------------------------------------
@@ -1168,6 +1517,7 @@ end
 function handlers.ENCOUNTER_START(_, name)
   encounter = { name = Show(name), start = GetTime() }
   stats.boss = nil
+  partyCasts.boss = nil
   wipe(alerted)
   wipe(bossReadable)
   wipe(meterFinds)
@@ -1196,6 +1546,7 @@ function handlers.ENCOUNTER_END(_, name, _, _, success)
   local kind = (not IsSecret(success) and success == 1) and "kill" or "wipe"
   local lasted = encounter and (GetTime() - encounter.start) or 0
   Log("boss end: %s, %s after %.0f s %s", Show(name), kind, lasted, Flags())
+  ReportPartyCasts("boss", lasted)
   CheckAllMeters("boss end")
   -- Keep this boss's results for the other probe users; they go out in
   -- 15 s, or when the chat lock ends if it's still on then.
@@ -1230,6 +1581,7 @@ function handlers.ENCOUNTER_END(_, name, _, _, success)
 end
 
 function handlers.PLAYER_REGEN_DISABLED()
+  ReportPartyCasts("ooc")
   ClearMeterIcons()
   wipe(meterSeen)
   wipe(meterStatus)
@@ -1260,6 +1612,7 @@ function handlers.PLAYER_REGEN_ENABLED()
     end
     CheckAllMeters("after combat")
     LogOwnCasts()
+    ReportPartyCasts("trash")
     if refreshAfterCombat then
       OnGroupChanged("after combat")
     end
@@ -1353,12 +1706,27 @@ for event in pairs(handlers) do
   end
 end
 
+-- One frame per party slot, so the unit is known without reading the
+-- event's own unit argument, which may be secret.
+for _, unit in ipairs(PARTY_UNITS) do
+  local frame = CreateFrame("Frame")
+  if pcall(frame.RegisterUnitEvent, frame, "UNIT_SPELLCAST_SUCCEEDED", unit) then
+    frame:SetScript("OnEvent", function(_, _, _, _, spellID)
+      Safe(OnPartyCast, unit, spellID)
+    end)
+  else
+    Log("could not register party casts for %s", unit)
+  end
+end
+
 -- Slash command ---------------------------------------------------------------------
 
 local HELP = {
   "/smp send - send a test message on every channel now",
   "/smp bnet - show the Battle.net link to each party member",
   "/smp secrecy - list which spells the game never hides",
+  "/smp flags - check Blizzard's yes/no flags of every spell (out of combat, then /reload)",
+  "/smp flags clear - drop the saved flag results",
   "/smp meter - check the damage meter now; /smp meter on - switch it on",
   "/smp sounds - register the defensive sounds again",
   "/smp status - chat lock, boss, peers and the last boss summary",
@@ -1404,6 +1772,13 @@ SlashCmdList.SAKAMINDPROBE = function(message)
       PrintLinks()
     elseif command == "secrecy" then
       SecrecyReport()
+    elseif command == "flags" then
+      if argument == "clear" then
+        db.flags = nil
+        Say("flag results dropped")
+      else
+        StartFlags()
+      end
     elseif command == "meter" then
       if argument == "on" then
         if InCombatLockdown() then

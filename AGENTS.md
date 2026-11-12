@@ -6,6 +6,13 @@ Read [docs/RESEARCH.md](docs/RESEARCH.md) first: it holds what the client
 allows, above all during boss fights. The design isn't agreed yet. The test
 add-on `SakaMindProbe` runs first ([docs/TEST-RUN.md](docs/TEST-RUN.md)).
 
+**Discontinued on 2026-11-11** at the player's request, after the tests in
+docs/RESEARCH.md closed the routes for boss fights. The GitHub repository is
+archived (read-only) and the probe is no longer linked into the game's
+AddOns folder. Don't resume the work unless the player asks; pushing would
+first need `gh repo unarchive CynGames/SakaMind`. The rest of this file
+describes how the project was run.
+
 The paladin wrote SakaBind (on CurseForge, MIT license); the SakaMind name
 belongs to the same family and was agreed on 2026-11-10. SakaMind is
 published on CurseForge from the player's account, MIT license, built from
